@@ -1,0 +1,7 @@
+Paste this code in the CLI to put custom alert mertric to test the flow
+
+aws cloudwatch put-metric-data \
+  --namespace "Custom/AlertSystem" \
+  --metric-name "CustomAlertMetric" \
+  --value 2 \
+  --dimensions Environment=Test

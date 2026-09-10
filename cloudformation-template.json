@@ -1,0 +1,214 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Event-Driven Alert Notification System with Test Alarm",
+  "Resources": {
+    "AlertTopic": {
+      "Type": "AWS::SNS::Topic",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "TopicName": "HighPriorityAlerts"
+      }
+    },
+    "AlertQueue": {
+      "Type": "AWS::SQS::Queue",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "QueueName": "AlertQueue"
+      }
+    },
+    "LambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "RoleName": "AlertProcessorRole",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "AlertProcessorPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sns:Publish",
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes",
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AlertProcessorFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "FunctionName": "AlertSummaryProcessor",
+        "Runtime": "python3.9",
+        "Handler": "index.lambda_handler",
+        "Role": {
+          "Fn::GetAtt": ["LambdaExecutionRole", "Arn"]
+        },
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "import json",
+                "import boto3",
+                "import os",
+                "",
+                "sns = boto3.client('sns')",
+                "topic_arn = os.environ['SNS_TOPIC_ARN']",
+                "",
+                "def lambda_handler(event, context):",
+                "    alerts = []",
+                "    for record in event['Records']:",
+                "        message = json.loads(record['body'])",
+                "        detail = message.get('detail', {})",
+                "        alarm_name = detail.get('alarmName', 'Unknown Alarm')",
+                "        timestamp = detail.get('state', {}).get('timestamp', 'Unknown Time')",
+                "        reason = detail.get('state', {}).get('reason', 'No reason provided')",
+                "        alerts.append(f\"- {alarm_name} at {timestamp}\\n  Reason: {reason}\")",
+                "",
+                "    if alerts:",
+                "        summary = f\"🚨 {len(alerts)} High-Priority Alerts:\\n\" + \"\\n\".join(alerts)",
+                "        sns.publish(TopicArn=topic_arn, Message=summary, Subject='🚨 AWS Alert Summary')"
+              ]
+            ]
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "SNS_TOPIC_ARN": {
+              "Fn::GetAtt": ["AlertTopic", "TopicArn"]
+            }
+          }
+        }
+      }
+    },
+    "LambdaSQSPermission": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": ["AlertQueue", "Arn"]
+        },
+        "FunctionName": {
+          "Ref": "AlertProcessorFunction"
+        },
+        "BatchSize": 1,
+        "Enabled": true
+      }
+    },
+    "EventBridgeToSQSRole": {
+      "Type": "AWS::IAM::Role",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "RoleName": "EventBridgeToSQSRole",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "events.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "AllowSQSSendMessage",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": ["sqs:SendMessage"],
+                  "Resource": {
+                    "Fn::GetAtt": ["AlertQueue", "Arn"]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AlarmEventRule": {
+      "Type": "AWS::Events::Rule",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "Name": "AlarmToSQSRule",
+        "EventPattern": {
+          "source": ["aws.cloudwatch"],
+          "detail-type": ["CloudWatch Alarm State Change"],
+          "detail": {
+            "state": {
+              "value": ["ALARM"]
+            }
+          }
+        },
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": ["AlertQueue", "Arn"]
+            },
+            "Id": "TargetQueue",
+            "RoleArn": {
+              "Fn::GetAtt": ["EventBridgeToSQSRole", "Arn"]
+            }
+          }
+        ]
+      }
+    },
+    "CustomMetricAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AlarmName": "TestHighPriorityAlarm",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "CustomAlertMetric",
+        "Namespace": "Custom/AlertSystem",
+        "Period": 60,
+        "Statistic": "Average",
+        "Threshold": 1,
+        "AlarmDescription": "Simulated high-priority alert for testing",
+        "ActionsEnabled": true,
+        "AlarmActions": [
+          {
+            "Ref": "AlertTopic"
+          }
+        ],
+        "Dimensions": [
+          {
+            "Name": "Environment",
+            "Value": "Test"
+          }
+        ]
+      }
+    }
+  }
+}
